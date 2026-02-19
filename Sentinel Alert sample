@@ -1,0 +1,9 @@
+rule_id,rule_name,severity,disposition,time_to_close_minutes,event_signature,confidence
+1001,Impossible Travel,high,false_positive,12,user=a@corp|ip=1.2.3.4,0.6
+1001,Impossible Travel,high,false_positive,10,user=a@corp|ip=1.2.3.4,0.6
+1001,Impossible Travel,high,true_positive,35,user=b@corp|ip=5.6.7.8,0.7
+1002,Suspicious OAuth App,medium,true_positive,90,app=evilapp|user=c@corp,0.8
+1002,Suspicious OAuth App,medium,true_positive,70,app=evilapp|user=c@corp,0.8
+1003,Port Scan Detected,medium,false_positive,5,src=10.0.0.5|dst=10.0.0.9,0.4
+1003,Port Scan Detected,medium,false_positive,4,src=10.0.0.5|dst=10.0.0.9,0.4
+1003,Port Scan Detected,medium,false_positive,6,src=10.0.0.5|dst=10.0.0.9,0.4
