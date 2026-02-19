@@ -1,0 +1,50 @@
+import pandas as pd
+
+# Minimal normalized schema (extend later):
+# rule_id, rule_name, severity, disposition, time_to_close_minutes, event_signature, confidence
+REQUIRED_COLS = ["rule_id", "rule_name", "severity", "disposition", "time_to_close_minutes", "event_signature"]
+
+def normalize_alerts_df(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+
+    # Allow users to upload exports with slightly different column names
+    column_map = {
+        "AlertName": "rule_name",
+        "RuleName": "rule_name",
+        "RuleId": "rule_id",
+        "AlertSeverity": "severity",
+        "Severity": "severity",
+        "Disposition": "disposition",
+        "Status": "disposition",
+        "TimeToCloseMinutes": "time_to_close_minutes",
+        "TTCMinutes": "time_to_close_minutes",
+        "Signature": "event_signature",
+        "EventSignature": "event_signature",
+        "Confidence": "confidence",
+    }
+
+    for src, dst in column_map.items():
+        if src in df.columns and dst not in df.columns:
+            df[dst] = df[src]
+
+    # Defaults
+    if "confidence" not in df.columns:
+        df["confidence"] = 0.5  # 0..1
+
+    # Basic cleanup
+    if "time_to_close_minutes" in df.columns:
+        df["time_to_close_minutes"] = pd.to_numeric(df["time_to_close_minutes"], errors="coerce").fillna(0)
+
+    if "severity" in df.columns:
+        df["severity"] = df["severity"].astype(str).str.lower()
+
+    if "disposition" in df.columns:
+        df["disposition"] = df["disposition"].astype(str).str.lower()
+
+    missing = [c for c in REQUIRED_COLS if c not in df.columns]
+    if missing:
+        raise ValueError(f"Missing required columns after normalization: {missing}")
+
+    # Keep only normalized columns + confidence
+    keep = REQUIRED_COLS + ["confidence"]
+    return df[keep]
