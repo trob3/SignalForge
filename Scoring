@@ -1,0 +1,93 @@
+import pandas as pd
+
+def _clip01(x: float) -> float:
+    return max(0.0, min(1.0, float(x)))
+
+def score_detections(alerts: pd.DataFrame) -> dict:
+    """
+    Returns:
+      - per_rule: list of per-rule score objects
+      - summary: top noisy rules, overall metrics
+    """
+
+    df = alerts.copy()
+
+    # Define what counts as "false positive"
+    # You can expand with your org’s labels ("benign", "expected", etc.)
+    false_positive_labels = {"false_positive", "benign", "expected", "no_issue"}
+    true_positive_labels = {"true_positive", "confirmed", "malicious"}
+
+    df["is_fp"] = df["disposition"].isin(false_positive_labels).astype(int)
+    df["is_tp"] = df["disposition"].isin(true_positive_labels).astype(int)
+
+    # Duplication proxy: how often the same event_signature repeats for a rule
+    df["sig_count_for_rule"] = df.groupby(["rule_id", "event_signature"])["event_signature"].transform("count")
+    # Normalize duplication per alert to 0..1 (1 == lots of repeats)
+    df["dup_factor"] = (df["sig_count_for_rule"] - 1).clip(lower=0)
+    # scale: 0 repeats => 0, 10+ repeats => 1
+    df["dup_factor"] = (df["dup_factor"] / 10.0).clip(0, 1)
+
+    # Time-to-close friction: 0..1 scaling (0 fast, 1 slow)
+    # scale: 0 min => 0, 240+ min => 1
+    df["ttc_factor"] = (df["time_to_close_minutes"] / 240.0).clip(0, 1)
+
+    # Confidence already 0..1
+    df["confidence"] = df["confidence"].apply(_clip01)
+
+    grouped = df.groupby(["rule_id", "rule_name"], dropna=False)
+
+    rows = []
+    for (rule_id, rule_name), g in grouped:
+        total = len(g)
+        fp_rate = (g["is_fp"].sum() / total) if total else 0.0
+        tp_rate = (g["is_tp"].sum() / total) if total else 0.0
+
+        avg_dup = float(g["dup_factor"].mean()) if total else 0.0
+        avg_ttc = float(g["ttc_factor"].mean()) if total else 0.0
+        avg_conf = float(g["confidence"].mean()) if total else 0.5
+
+        # v0 scoring: start from 100 then subtract penalties, add small confidence bonus
+        # Penalties are weighted to reflect SOC pain:
+        # - FP rate is the biggest killer
+        # - Duplication and TTC also hurt
+        score = 100.0
+        score -= 60.0 * fp_rate          # up to -60
+        score -= 20.0 * avg_dup          # up to -20
+        score -= 15.0 * avg_ttc          # up to -15
+        score += 10.0 * (avg_conf - 0.5) # -5..+5
+
+        score = max(0.0, min(100.0, score))
+
+        rows.append({
+            "rule_id": str(rule_id),
+            "rule_name": str(rule_name),
+            "alerts": total,
+            "false_positive_rate": round(fp_rate, 4),
+            "true_positive_rate": round(tp_rate, 4),
+            "avg_duplication_factor": round(avg_dup, 4),
+            "avg_ttc_factor": round(avg_ttc, 4),
+            "avg_confidence": round(avg_conf, 4),
+            "detection_quality_score": round(score, 2),
+            "tuning_priority": _priority(score, fp_rate, avg_dup, avg_ttc),
+        })
+
+    per_rule = sorted(rows, key=lambda r: (r["detection_quality_score"], -r["alerts"]))
+
+    summary = {
+        "rules_scored": len(per_rule),
+        "total_alerts": int(len(df)),
+        "lowest_scores": per_rule[:5],
+        "highest_scores": sorted(per_rule, key=lambda r: r["detection_quality_score"], reverse=True)[:5],
+    }
+
+    return {"per_rule": per_rule, "summary": summary}
+
+def _priority(score: float, fp_rate: float, dup: float, ttc: float) -> str:
+    # simple rule-based priority for MVP
+    if score < 40 or fp_rate > 0.6:
+        return "P0"
+    if score < 60 or (dup > 0.4 and fp_rate > 0.3):
+        return "P1"
+    if score < 75:
+        return "P2"
+    return "P3"
