@@ -1,0 +1,13 @@
+import pandas as pd
+from signalforge.core.scoring import score_detections
+
+def test_score_detections_returns_expected_keys():
+    df = pd.DataFrame([
+        {"rule_id":"1","rule_name":"A","severity":"high","disposition":"false_positive","time_to_close_minutes":10,"event_signature":"x","confidence":0.5},
+        {"rule_id":"1","rule_name":"A","severity":"high","disposition":"true_positive","time_to_close_minutes":60,"event_signature":"y","confidence":0.6},
+    ])
+    res = score_detections(df)
+    assert "per_rule" in res
+    assert "summary" in res
+    assert len(res["per_rule"]) == 1
+    assert res["per_rule"][0]["detection_quality_score"] <= 100
