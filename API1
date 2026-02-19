@@ -1,0 +1,14 @@
+from fastapi import FastAPI
+from signalforge.api.routes import router
+
+app = FastAPI(
+    title="SignalForge",
+    version="0.1.0",
+    description="Detection Quality Scoring & Alert Noise Optimizer (MVP)",
+)
+
+app.include_router(router)
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
