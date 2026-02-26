@@ -1,13 +1,299 @@
+import pytest
 import pandas as pd
-from signalforge.core.scoring import score_detections
 
-def test_score_detections_returns_expected_keys():
-    df = pd.DataFrame([
-        {"rule_id":"1","rule_name":"A","severity":"high","disposition":"false_positive","time_to_close_minutes":10,"event_signature":"x","confidence":0.5},
-        {"rule_id":"1","rule_name":"A","severity":"high","disposition":"true_positive","time_to_close_minutes":60,"event_signature":"y","confidence":0.6},
+from signalforge.core.scoring import (
+    ScoringResult,
+    RuleScore,
+    _compute_score,
+    _priority,
+    score_detections,
+)
+
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def single_rule_df():
+    """One rule, two alerts: one FP, one TP."""
+    return pd.DataFrame([
+        {
+            "rule_id": "1", "rule_name": "Rule A", "severity": "high",
+            "disposition": "false positive", "time_to_close_minutes": 10,
+            "event_signature": "sig_x", "confidence": 0.5,
+        },
+        {
+            "rule_id": "1", "rule_name": "Rule A", "severity": "high",
+            "disposition": "true positive", "time_to_close_minutes": 60,
+            "event_signature": "sig_y", "confidence": 0.6,
+        },
     ])
-    res = score_detections(df)
-    assert "per_rule" in res
-    assert "summary" in res
-    assert len(res["per_rule"]) == 1
-    assert res["per_rule"][0]["detection_quality_score"] <= 100
+
+
+@pytest.fixture
+def two_rule_df():
+    """Two rules with clearly different quality."""
+    return pd.DataFrame([
+        # Rule A — high noise (all FP, lots of duplicates)
+        {"rule_id": "1", "rule_name": "Noisy Rule",  "severity": "low",
+         "disposition": "false positive", "time_to_close_minutes": 240,
+         "event_signature": "same_sig", "confidence": 0.2},
+        {"rule_id": "1", "rule_name": "Noisy Rule",  "severity": "low",
+         "disposition": "false positive", "time_to_close_minutes": 200,
+         "event_signature": "same_sig", "confidence": 0.2},
+        {"rule_id": "1", "rule_name": "Noisy Rule",  "severity": "low",
+         "disposition": "false positive", "time_to_close_minutes": 180,
+         "event_signature": "same_sig", "confidence": 0.2},
+        # Rule B — healthy (all TP, fast close, no duplication)
+        {"rule_id": "2", "rule_name": "Clean Rule",  "severity": "high",
+         "disposition": "true positive", "time_to_close_minutes": 5,
+         "event_signature": "unique_1", "confidence": 0.9},
+        {"rule_id": "2", "rule_name": "Clean Rule",  "severity": "high",
+         "disposition": "true positive", "time_to_close_minutes": 3,
+         "event_signature": "unique_2", "confidence": 0.95},
+    ])
+
+
+@pytest.fixture
+def perfect_rule_df():
+    """A rule that should score 100 (or very close)."""
+    return pd.DataFrame([
+        {"rule_id": "99", "rule_name": "Perfect Rule", "severity": "high",
+         "disposition": "true positive", "time_to_close_minutes": 0,
+         "event_signature": "unique_sig", "confidence": 1.0},
+    ])
+
+
+@pytest.fixture
+def worst_rule_df():
+    """A rule that should score 0."""
+    return pd.DataFrame([
+        {"rule_id": "0", "rule_name": "Worst Rule", "severity": "low",
+         "disposition": "false positive", "time_to_close_minutes": 999,
+         "event_signature": "same_sig", "confidence": 0.0},
+        {"rule_id": "0", "rule_name": "Worst Rule", "severity": "low",
+         "disposition": "false positive", "time_to_close_minutes": 999,
+         "event_signature": "same_sig", "confidence": 0.0},
+        {"rule_id": "0", "rule_name": "Worst Rule", "severity": "low",
+         "disposition": "false positive", "time_to_close_minutes": 999,
+         "event_signature": "same_sig", "confidence": 0.0},
+    ])
+
+
+# ---------------------------------------------------------------------------
+# Return type & structure
+# ---------------------------------------------------------------------------
+
+class TestReturnStructure:
+    def test_returns_scoring_result(self, single_rule_df):
+        result = score_detections(single_rule_df)
+        assert isinstance(result, ScoringResult)
+
+    def test_per_rule_contains_rule_score_objects(self, single_rule_df):
+        result = score_detections(single_rule_df)
+        assert all(isinstance(r, RuleScore) for r in result.per_rule)
+
+    def test_correct_rule_count(self, single_rule_df):
+        result = score_detections(single_rule_df)
+        assert result.rules_scored == 1
+        assert len(result.per_rule) == 1
+
+    def test_total_alerts_count(self, single_rule_df):
+        result = score_detections(single_rule_df)
+        assert result.total_alerts == 2
+
+    def test_two_rules_scored(self, two_rule_df):
+        result = score_detections(two_rule_df)
+        assert result.rules_scored == 2
+
+    def test_summary_top_n_default(self, two_rule_df):
+        result = score_detections(two_rule_df)
+        assert len(result.lowest_scores) <= 5
+        assert len(result.highest_scores) <= 5
+
+    def test_summary_top_n_custom(self, two_rule_df):
+        result = score_detections(two_rule_df, top_n=1)
+        assert len(result.lowest_scores) == 1
+        assert len(result.highest_scores) == 1
+
+
+# ---------------------------------------------------------------------------
+# Score bounds & ordering
+# ---------------------------------------------------------------------------
+
+class TestScoreBounds:
+    def test_score_within_0_100(self, single_rule_df):
+        result = score_detections(single_rule_df)
+        for rule in result.per_rule:
+            assert 0.0 <= rule.detection_quality_score <= 100.0
+
+    def test_perfect_rule_scores_high(self, perfect_rule_df):
+        result = score_detections(perfect_rule_df)
+        assert result.per_rule[0].detection_quality_score >= 95.0
+
+    def test_worst_rule_scores_zero(self, worst_rule_df):
+        result = score_detections(worst_rule_df)
+        assert result.per_rule[0].detection_quality_score == 0.0
+
+    def test_noisy_rule_scores_lower_than_clean(self, two_rule_df):
+        result = score_detections(two_rule_df)
+        scores = {r.rule_name: r.detection_quality_score for r in result.per_rule}
+        assert scores["Noisy Rule"] < scores["Clean Rule"]
+
+    def test_per_rule_sorted_ascending(self, two_rule_df):
+        result = score_detections(two_rule_df)
+        scores = [r.detection_quality_score for r in result.per_rule]
+        assert scores == sorted(scores)
+
+    def test_lowest_scores_is_worst_first(self, two_rule_df):
+        result = score_detections(two_rule_df)
+        assert result.lowest_scores[0].rule_name == "Noisy Rule"
+
+    def test_highest_scores_is_best_first(self, two_rule_df):
+        result = score_detections(two_rule_df)
+        assert result.highest_scores[0].rule_name == "Clean Rule"
+
+
+# ---------------------------------------------------------------------------
+# Rate calculations
+# ---------------------------------------------------------------------------
+
+class TestRateCalculations:
+    def test_fp_rate_calculation(self, single_rule_df):
+        result = score_detections(single_rule_df)
+        rule = result.per_rule[0]
+        assert rule.false_positive_rate == 0.5   # 1 FP out of 2 alerts
+
+    def test_tp_rate_calculation(self, single_rule_df):
+        result = score_detections(single_rule_df)
+        rule = result.per_rule[0]
+        assert rule.true_positive_rate == 0.5
+
+    def test_all_fp_rate_is_one(self, worst_rule_df):
+        result = score_detections(worst_rule_df)
+        assert result.per_rule[0].false_positive_rate == 1.0
+
+    def test_all_tp_rate_is_one(self, perfect_rule_df):
+        result = score_detections(perfect_rule_df)
+        assert result.per_rule[0].true_positive_rate == 1.0
+
+
+# ---------------------------------------------------------------------------
+# _compute_score unit tests (pure function — no DataFrame needed)
+# ---------------------------------------------------------------------------
+
+class TestComputeScore:
+    def test_perfect_inputs(self):
+        assert _compute_score(0.0, 0.0, 0.0, 1.0) == 105.0  # clamped to 100
+        # after clamp:
+        assert min(100.0, _compute_score(0.0, 0.0, 0.0, 1.0)) == 100.0
+
+    def test_worst_inputs(self):
+        score = _compute_score(1.0, 1.0, 1.0, 0.0)
+        assert score == 0.0  # 100 - 60 - 20 - 15 - 5 = 0, clamped
+
+    def test_fp_rate_dominates(self):
+        high_fp = _compute_score(1.0, 0.0, 0.0, 0.5)
+        low_fp  = _compute_score(0.0, 1.0, 1.0, 0.5)
+        assert high_fp < low_fp   # 60pt penalty > 35pt combined
+
+    def test_confidence_nudge_neutral_at_half(self):
+        score = _compute_score(0.0, 0.0, 0.0, 0.5)
+        assert score == 100.0
+
+    def test_confidence_nudge_positive(self):
+        score_high_conf = _compute_score(0.0, 0.0, 0.0, 1.0)
+        score_mid_conf  = _compute_score(0.0, 0.0, 0.0, 0.5)
+        assert score_high_conf > score_mid_conf
+
+    def test_confidence_nudge_negative(self):
+        score_low_conf = _compute_score(0.0, 0.0, 0.0, 0.0)
+        score_mid_conf = _compute_score(0.0, 0.0, 0.0, 0.5)
+        assert score_low_conf < score_mid_conf
+
+
+# ---------------------------------------------------------------------------
+# _priority unit tests
+# ---------------------------------------------------------------------------
+
+class TestPriority:
+    def test_p0_on_low_score(self):
+        assert _priority(35.0, 0.1, 0.1) == "P0"
+
+    def test_p0_on_high_fp_rate(self):
+        assert _priority(80.0, 0.65, 0.1) == "P0"
+
+    def test_p1_on_mid_score(self):
+        assert _priority(55.0, 0.2, 0.1) == "P1"
+
+    def test_p1_on_dup_fp_combo(self):
+        assert _priority(65.0, 0.35, 0.5) == "P1"
+
+    def test_p2_on_moderate_score(self):
+        assert _priority(70.0, 0.1, 0.1) == "P2"
+
+    def test_p3_on_healthy_score(self):
+        assert _priority(80.0, 0.1, 0.1) == "P3"
+
+    def test_boundary_p0_p1(self):
+        assert _priority(40.0, 0.1, 0.1) == "P1"   # score == 40, just out of P0
+        assert _priority(39.9, 0.1, 0.1) == "P0"
+
+    def test_boundary_p2_p3(self):
+        assert _priority(75.0, 0.1, 0.1) == "P3"   # score == 75, just into P3
+        assert _priority(74.9, 0.1, 0.1) == "P2"
+
+
+# ---------------------------------------------------------------------------
+# Edge cases & error handling
+# ---------------------------------------------------------------------------
+
+class TestEdgeCases:
+    def test_empty_dataframe_raises(self):
+        with pytest.raises(ValueError, match="empty"):
+            score_detections(pd.DataFrame())
+
+    def test_missing_required_column_raises(self):
+        df = pd.DataFrame([{"rule_id": "1", "rule_name": "A"}])
+        with pytest.raises(ValueError, match="missing columns"):
+            score_detections(df)
+
+    def test_undetermined_disposition_not_fp_or_tp(self, single_rule_df):
+        df = single_rule_df.copy()
+        df["disposition"] = "undetermined"
+        result = score_detections(df)
+        rule = result.per_rule[0]
+        assert rule.false_positive_rate == 0.0
+        assert rule.true_positive_rate == 0.0
+
+    def test_single_alert_rule(self):
+        df = pd.DataFrame([{
+            "rule_id": "1", "rule_name": "Solo", "severity": "high",
+            "disposition": "true positive", "time_to_close_minutes": 30,
+            "event_signature": "sig", "confidence": 0.8,
+        }])
+        result = score_detections(df)
+        assert result.rules_scored == 1
+        assert 0.0 <= result.per_rule[0].detection_quality_score <= 100.0
+
+    def test_confidence_clipped_above_1(self):
+        df = pd.DataFrame([{
+            "rule_id": "1", "rule_name": "A", "severity": "high",
+            "disposition": "true positive", "time_to_close_minutes": 0,
+            "event_signature": "sig", "confidence": 99.0,  # badly scaled
+        }])
+        result = score_detections(df)
+        assert result.per_rule[0].detection_quality_score <= 100.0
+
+    def test_duplicate_signatures_increase_dup_factor(self):
+        base = {"rule_id": "1", "rule_name": "A", "severity": "high",
+                "disposition": "true positive", "time_to_close_minutes": 5, "confidence": 0.5}
+        # 11 alerts with same signature → max dup penalty
+        df_dupes  = pd.DataFrame([{**base, "event_signature": "same"} for _ in range(11)])
+        # 11 alerts with unique signatures → no dup penalty
+        df_unique = pd.DataFrame([{**base, "event_signature": f"sig_{i}"} for i in range(11)])
+
+        dupes_score  = score_detections(df_dupes).per_rule[0].detection_quality_score
+        unique_score = score_detections(df_unique).per_rule[0].detection_quality_score
+        assert dupes_score < unique_score
