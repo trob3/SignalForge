@@ -1,9 +1,12 @@
-rule_id,rule_name,severity,disposition,time_to_close_minutes,event_signature,confidence
-1001,Impossible Travel,high,false_positive,12,user=a@corp|ip=1.2.3.4,0.6
-1001,Impossible Travel,high,false_positive,10,user=a@corp|ip=1.2.3.4,0.6
-1001,Impossible Travel,high,true_positive,35,user=b@corp|ip=5.6.7.8,0.7
-1002,Suspicious OAuth App,medium,true_positive,90,app=evilapp|user=c@corp,0.8
-1002,Suspicious OAuth App,medium,true_positive,70,app=evilapp|user=c@corp,0.8
-1003,Port Scan Detected,medium,false_positive,5,src=10.0.0.5|dst=10.0.0.9,0.4
-1003,Port Scan Detected,medium,false_positive,4,src=10.0.0.5|dst=10.0.0.9,0.4
-1003,Port Scan Detected,medium,false_positive,6,src=10.0.0.5|dst=10.0.0.9,0.4
+def test_sample_csv_scores():
+    """Regression test against the canonical Sentinel Alert sample."""
+    df = pd.read_csv("tests/fixtures/sentinel_alert_sample.csv")
+    norm = normalize_alerts_df(df)
+    result = score_detections(norm)
+    scores = {r.rule_name: r.detection_quality_score for r in result.per_rule}
+
+    assert scores["Port Scan Detected"]     <  40.0   # P0
+    assert scores["Impossible Travel"]      <  65.0   # P1
+    assert scores["Suspicious OAuth App"]   >  90.0   # P3
+    assert result.lowest_scores[0].rule_name == "Port Scan Detected"
+    assert result.highest_scores[0].rule_name == "Suspicious OAuth App"
