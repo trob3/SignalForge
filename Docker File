@@ -1,9 +1,48 @@
-FROM python:3.11-slim
+# ---------------------------------------------------------------------------
+# Builder stage — install dependencies separately from source code
+# ---------------------------------------------------------------------------
+FROM python:3.11-slim AS builder
+
+WORKDIR /build
+
+# Install build dependencies
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends gcc libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy only dependency files first — this layer is cached until they change
+COPY pyproject.toml README.md ./
+
+# Install dependencies into an isolated prefix
+RUN pip install --no-cache-dir -U pip \
+    && pip install --no-cache-dir --prefix=/install -e .
+
+
+# ---------------------------------------------------------------------------
+# Runtime stage — lean final image
+# ---------------------------------------------------------------------------
+FROM python:3.11-slim AS runtime
+
+# Security: run as non-root user
+RUN useradd --create-home --shell /bin/bash appuser
 
 WORKDIR /app
-COPY pyproject.toml README.md /app/
-COPY signalforge /app/signalforge
-RUN pip install --no-cache-dir -U pip && pip install --no-cache-dir -e .
+
+# Copy installed packages from builder
+COPY --from=builder /install /usr/local
+
+# Copy source code (changes most frequently — last to preserve cache)
+COPY --chown=appuser:appuser signalforge ./signalforge
+
+USER appuser
 
 EXPOSE 8000
-CMD ["uvicorn", "signalforge.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+# Use exec form (not shell form) so signals reach uvicorn directly
+# --workers 1 is intentional for MVP — scale via docker-compose replicas
+CMD ["uvicorn", "signalforge.api.main:app", \
+     "--host", "0.0.0.0", \
+     "--port", "8000", \
+     "--workers", "1", \
+     "--log-level", "info", \
+     "--no-access-log"]
