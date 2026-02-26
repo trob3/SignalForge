@@ -1,23 +1,88 @@
-from fastapi import APIRouter, File, UploadFile, HTTPException
+import io
+from typing import List
+
 import pandas as pd
+from fastapi import APIRouter, File, HTTPException, UploadFile
+from pydantic import BaseModel
 
 from signalforge.core.normalization import normalize_alerts_df
 from signalforge.core.scoring import score_detections
 
 router = APIRouter(prefix="/v1")
 
-@router.post("/score/csv")
-async def score_csv(file: UploadFile = File(...)):
-    if not file.filename.lower().endswith(".csv"):
-        raise HTTPException(status_code=400, detail="Please upload a CSV file.")
+MAX_BYTES = 10 * 1024 * 1024  # 10MB
+ALLOWED_CONTENT_TYPES = {"text/csv", "application/csv", "text/plain"}
 
+
+class DetectionScore(BaseModel):
+    rule_name: str
+    score: float
+    fp_rate: float
+    duplication_rate: float
+    avg_time_to_close: float
+    confidence: float
+    alert_count: int
+
+
+@router.post(
+    "/score/csv",
+    response_model=List[DetectionScore],
+    summary="Score detections from a CSV alert export",
+    description="Upload a CSV exported from Sentinel, Splunk, or Security Hub. "
+                "Returns a Detection Quality Score (0–100) per rule.",
+)
+async def score_csv(file: UploadFile = File(...)) -> List[DetectionScore]:
+    # --- Validate file type ---
+    if not file.filename.lower().endswith(".csv"):
+        raise HTTPException(status_code=400, detail="File must have a .csv extension.")
+    if file.content_type and file.content_type not in ALLOWED_CONTENT_TYPES:
+        raise HTTPException(
+            status_code=415,
+            detail=f"Unsupported content type '{file.content_type}'. Expected a CSV.",
+        )
+
+    # --- Read & enforce size limit ---
     raw = await file.read()
+    if len(raw) > MAX_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large. Maximum allowed size is {MAX_BYTES // (1024 * 1024)}MB.",
+        )
+    if len(raw) == 0:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+
+    # --- Parse CSV ---
     try:
-        df = pd.read_csv(pd.io.common.BytesIO(raw))
+        df = pd.read_csv(io.BytesIO(raw))
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Could not parse CSV: {e}")
 
-    norm = normalize_alerts_df(df)
-    result = score_detections(norm)
+    if df.empty:
+        raise HTTPException(status_code=422, detail="CSV parsed successfully but contains no data rows.")
+
+    # --- Normalize ---
+    try:
+        norm = normalize_alerts_df(df)
+    except KeyError as e:
+        raise HTTPException(
+            status_code=422,
+            detail=f"CSV is missing a required column: {e}. "
+                   "Ensure your export includes rule_name, disposition, and closed_at fields.",
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=f"Normalization error: {e}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Unexpected error during normalization: {e}")
+
+    # --- Score ---
+    try:
+        result = score_detections(norm)
+    except KeyError as e:
+        raise HTTPException(status_code=422, detail=f"Scoring failed — missing field: {e}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Unexpected error during scoring: {e}")
+
+    if not result:
+        raise HTTPException(status_code=422, detail="Scoring produced no results. Check your input data.")
 
     return result
