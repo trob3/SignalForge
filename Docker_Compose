@@ -1,5 +1,72 @@
+name: signalforge
+
 services:
+
+  # ---------------------------------------------------------------------------
+  # API
+  # ---------------------------------------------------------------------------
   api:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    image: signalforge-api:latest
+    container_name: signalforge-api
+    restart: unless-stopped
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"    # Bind to localhost only — don't expose to 0.0.0.0 in dev
+    environment:
+      - APP_ENV=${APP_ENV:-development}
+      - DEBUG=${DEBUG:-true}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - DATABASE_URL=${DATABASE_URL:-}
+    env_file:
+      - .env
+    volumes:
+      - ./signalforge:/app/signalforge:ro    # Live reload in dev without rebuild
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - signalforge-net
+
+  # ---------------------------------------------------------------------------
+  # Database (future — stubbed and ready)
+  # ---------------------------------------------------------------------------
+  db:
+    image: postgres:16-alpine
+    container_name: signalforge-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-signalforge}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+      POSTGRES_DB: ${POSTGRES_DB:-signalforge}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-signalforge}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - signalforge-net
+    ports:
+      - "127.0.0.1:5432:5432"    # Local access for psql/DBeaver — remove in production
+
+# ---------------------------------------------------------------------------
+# Volumes & networks
+# ---------------------------------------------------------------------------
+volumes:
+  postgres_data:
+    driver: local
+
+networks:
+  signalforge-net:
+    driver: bridge
