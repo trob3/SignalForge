@@ -1,17 +1,75 @@
 ---
-name: Bug report
-about: Report a problem
-title: "[Bug] "
-labels: bug
+name: Bug Report
+about: Report a problem with SignalForge scoring, normalization, or the API
+title: "[Bug] <short description>"
+labels: ["bug", "needs-triage"]
+assignees: ""
 ---
 
-## What happened?
+## Summary
+<!-- One or two sentences describing the bug clearly.
+     e.g. "Uploading a Sentinel CSV export with 'AlertSeverity' column causes a 422 error
+     even though the column is listed in the normalization map." -->
 
-## Expected behavior
+## What Happened?
+<!-- What did SignalForge actually do? Include any error messages, stack traces,
+     or unexpected output in full. -->
 
-## Steps to reproduce
+<details>
+<summary>Error output / stack trace</summary>
+```
+paste here
+```
+
+</details>
+
+## Expected Behavior
+<!-- What should have happened instead? -->
+
+## Steps to Reproduce
+<!-- A minimal, reliable set of steps to trigger the bug.
+     The easier this is to follow, the faster it gets fixed. -->
+
+1.
+2.
+3.
+
+## Minimal Reproduction Case *(strongly encouraged)*
+<!-- If the bug involves a CSV, paste a small anonymised sample (3–5 rows).
+     Remove any real hostnames, IPs, usernames, or alert content before posting. -->
+
+<details>
+<summary>Sample CSV / payload</summary>
+```
+paste here
+```
+
+</details>
 
 ## Environment
-- OS:
-- Python:
-- Version/commit:
+
+| Field          | Value |
+|----------------|-------|
+| OS             |       |
+| Python version |       |
+| SignalForge version / commit |  |
+| Install method | `pip install -e .` / Docker / other |
+| SIEM source    | Sentinel / Splunk / Security Hub / other |
+
+## Affected Component
+<!-- Check all that apply -->
+- [ ] CSV ingestion / normalization
+- [ ] Scoring engine
+- [ ] API (`/v1/score/csv`)
+- [ ] Docker / deployment
+- [ ] Documentation
+- [ ] Other
+
+## Severity *(your read — maintainers will set the final label)*
+- [ ] P0 — Crashes or data loss
+- [ ] P1 — Wrong results, no workaround
+- [ ] P2 — Wrong results, workaround exists
+- [ ] P3 — Minor / cosmetic
+
+## Additional Context
+<!-- Links to related issues, PRs, or external references -->
