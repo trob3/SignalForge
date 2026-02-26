@@ -1,92 +1,194 @@
+import logging
+from dataclasses import dataclass, field
+
 import pandas as pd
 
-def _clip01(x: float) -> float:
-    return max(0.0, min(1.0, float(x)))
+logger = logging.getLogger(__name__)
 
-def score_detections(alerts: pd.DataFrame) -> dict:
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+FALSE_POSITIVE_LABELS = frozenset({"false positive", "false_positive", "benign", "expected", "no_issue"})
+TRUE_POSITIVE_LABELS  = frozenset({"true positive", "true_positive", "confirmed", "malicious"})
+
+# Scoring weights — adjust as your SOC calibrates the model
+W_FP_RATE  = 60.0   # up to -60  (biggest signal quality killer)
+W_DUP      = 20.0   # up to -20
+W_TTC      = 15.0   # up to -15
+W_CONF     = 10.0   # -5 .. +5   (bonus/penalty around 0.5 baseline)
+
+# Scaling denominators
+DUP_SCALE  = 10.0   # 10+ repeated signatures → dup_factor = 1.0
+TTC_SCALE  = 240.0  # 240+ minutes to close  → ttc_factor = 1.0
+
+# ---------------------------------------------------------------------------
+# Output types
+# ---------------------------------------------------------------------------
+
+@dataclass
+class RuleScore:
+    rule_id:                  str
+    rule_name:                str
+    alerts:                   int
+    false_positive_rate:      float
+    true_positive_rate:       float
+    avg_duplication_factor:   float
+    avg_ttc_factor:           float
+    avg_confidence:           float
+    detection_quality_score:  float
+    tuning_priority:          str
+
+
+@dataclass
+class ScoringResult:
+    per_rule:      list[RuleScore]
+    rules_scored:  int
+    total_alerts:  int
+    lowest_scores:  list[RuleScore] = field(default_factory=list)
+    highest_scores: list[RuleScore] = field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+def score_detections(alerts: pd.DataFrame, top_n: int = 5) -> ScoringResult:
     """
+    Score each detection rule in the normalized alerts DataFrame.
+
+    Args:
+        alerts:  Normalized DataFrame from normalize_alerts_df().
+        top_n:   How many rules to surface in lowest/highest score summaries.
+
     Returns:
-      - per_rule: list of per-rule score objects
-      - summary: top noisy rules, overall metrics
+        ScoringResult with per-rule scores and a summary.
+
+    Raises:
+        ValueError: if the DataFrame is empty or missing required columns.
     """
+    _validate_input(alerts)
 
     df = alerts.copy()
+    df = _compute_factors(df)
 
-    # Define what counts as "false positive"
-    # You can expand with your org’s labels ("benign", "expected", etc.)
-    false_positive_labels = {"false_positive", "benign", "expected", "no_issue"}
-    true_positive_labels = {"true_positive", "confirmed", "malicious"}
+    per_rule = _score_per_rule(df)
+    per_rule.sort(key=lambda r: (r.detection_quality_score, -r.alerts))
 
-    df["is_fp"] = df["disposition"].isin(false_positive_labels).astype(int)
-    df["is_tp"] = df["disposition"].isin(true_positive_labels).astype(int)
+    by_score_desc = sorted(per_rule, key=lambda r: r.detection_quality_score, reverse=True)
 
-    # Duplication proxy: how often the same event_signature repeats for a rule
-    df["sig_count_for_rule"] = df.groupby(["rule_id", "event_signature"])["event_signature"].transform("count")
-    # Normalize duplication per alert to 0..1 (1 == lots of repeats)
-    df["dup_factor"] = (df["sig_count_for_rule"] - 1).clip(lower=0)
-    # scale: 0 repeats => 0, 10+ repeats => 1
-    df["dup_factor"] = (df["dup_factor"] / 10.0).clip(0, 1)
+    logger.info(
+        "Scoring complete: %d rules, %d total alerts. "
+        "Lowest score: %.1f (%s), Highest: %.1f (%s)",
+        len(per_rule),
+        len(df),
+        per_rule[0].detection_quality_score if per_rule else 0,
+        per_rule[0].rule_name if per_rule else "—",
+        by_score_desc[0].detection_quality_score if by_score_desc else 0,
+        by_score_desc[0].rule_name if by_score_desc else "—",
+    )
 
-    # Time-to-close friction: 0..1 scaling (0 fast, 1 slow)
-    # scale: 0 min => 0, 240+ min => 1
-    df["ttc_factor"] = (df["time_to_close_minutes"] / 240.0).clip(0, 1)
+    return ScoringResult(
+        per_rule=per_rule,
+        rules_scored=len(per_rule),
+        total_alerts=len(df),
+        lowest_scores=per_rule[:top_n],
+        highest_scores=by_score_desc[:top_n],
+    )
 
-    # Confidence already 0..1
-    df["confidence"] = df["confidence"].apply(_clip01)
 
-    grouped = df.groupby(["rule_id", "rule_name"], dropna=False)
+# ---------------------------------------------------------------------------
+# Private helpers
+# ---------------------------------------------------------------------------
 
-    rows = []
-    for (rule_id, rule_name), g in grouped:
+def _validate_input(df: pd.DataFrame) -> None:
+    if df.empty:
+        raise ValueError("Cannot score an empty DataFrame.")
+    required = {"rule_id", "rule_name", "disposition", "time_to_close_minutes", "confidence", "event_signature"}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(f"Scoring input is missing columns: {missing}")
+
+
+def _compute_factors(df: pd.DataFrame) -> pd.DataFrame:
+    """Derive normalised (0–1) factor columns used in scoring."""
+
+    # Disposition flags — match against canonical labels from normalization
+    df["is_fp"] = df["disposition"].isin(FALSE_POSITIVE_LABELS).astype(int)
+    df["is_tp"] = df["disposition"].isin(TRUE_POSITIVE_LABELS).astype(int)
+
+    # Duplication factor: repeated (rule_id, event_signature) pairs → 0..1
+    sig_counts = df.groupby(["rule_id", "event_signature"])["event_signature"].transform("count")
+    df["dup_factor"] = ((sig_counts - 1).clip(lower=0) / DUP_SCALE).clip(0.0, 1.0)
+
+    # Time-to-close friction factor → 0..1
+    df["ttc_factor"] = (df["time_to_close_minutes"] / TTC_SCALE).clip(0.0, 1.0)
+
+    # Confidence — already validated 0..1, but clip defensively
+    df["confidence"] = df["confidence"].clip(0.0, 1.0)
+
+    return df
+
+
+def _score_per_rule(df: pd.DataFrame) -> list[RuleScore]:
+    rows: list[RuleScore] = []
+
+    for (rule_id, rule_name), g in df.groupby(["rule_id", "rule_name"], dropna=False):
         total = len(g)
-        fp_rate = (g["is_fp"].sum() / total) if total else 0.0
-        tp_rate = (g["is_tp"].sum() / total) if total else 0.0
+        if total == 0:
+            continue
 
-        avg_dup = float(g["dup_factor"].mean()) if total else 0.0
-        avg_ttc = float(g["ttc_factor"].mean()) if total else 0.0
-        avg_conf = float(g["confidence"].mean()) if total else 0.5
+        fp_rate  = float(g["is_fp"].sum() / total)
+        tp_rate  = float(g["is_tp"].sum() / total)
+        avg_dup  = float(g["dup_factor"].mean())
+        avg_ttc  = float(g["ttc_factor"].mean())
+        avg_conf = float(g["confidence"].mean())
 
-        # v0 scoring: start from 100 then subtract penalties, add small confidence bonus
-        # Penalties are weighted to reflect SOC pain:
-        # - FP rate is the biggest killer
-        # - Duplication and TTC also hurt
-        score = 100.0
-        score -= 60.0 * fp_rate          # up to -60
-        score -= 20.0 * avg_dup          # up to -20
-        score -= 15.0 * avg_ttc          # up to -15
-        score += 10.0 * (avg_conf - 0.5) # -5..+5
+        score = _compute_score(fp_rate, avg_dup, avg_ttc, avg_conf)
 
-        score = max(0.0, min(100.0, score))
+        rows.append(RuleScore(
+            rule_id=str(rule_id),
+            rule_name=str(rule_name),
+            alerts=total,
+            false_positive_rate=round(fp_rate, 4),
+            true_positive_rate=round(tp_rate, 4),
+            avg_duplication_factor=round(avg_dup, 4),
+            avg_ttc_factor=round(avg_ttc, 4),
+            avg_confidence=round(avg_conf, 4),
+            detection_quality_score=round(score, 2),
+            tuning_priority=_priority(score, fp_rate, avg_dup),
+        ))
 
-        rows.append({
-            "rule_id": str(rule_id),
-            "rule_name": str(rule_name),
-            "alerts": total,
-            "false_positive_rate": round(fp_rate, 4),
-            "true_positive_rate": round(tp_rate, 4),
-            "avg_duplication_factor": round(avg_dup, 4),
-            "avg_ttc_factor": round(avg_ttc, 4),
-            "avg_confidence": round(avg_conf, 4),
-            "detection_quality_score": round(score, 2),
-            "tuning_priority": _priority(score, fp_rate, avg_dup, avg_ttc),
-        })
+    return rows
 
-    per_rule = sorted(rows, key=lambda r: (r["detection_quality_score"], -r["alerts"]))
 
-    summary = {
-        "rules_scored": len(per_rule),
-        "total_alerts": int(len(df)),
-        "lowest_scores": per_rule[:5],
-        "highest_scores": sorted(per_rule, key=lambda r: r["detection_quality_score"], reverse=True)[:5],
-    }
+def _compute_score(fp_rate: float, avg_dup: float, avg_ttc: float, avg_conf: float) -> float:
+    """
+    Score formula (v0):
+        100
+        - 60 * fp_rate      (FP rate is the dominant penalty)
+        - 20 * avg_dup      (redundancy penalty)
+        - 15 * avg_ttc      (analyst friction penalty)
+        + 10 * (conf - 0.5) (confidence nudge: -5 to +5)
+    """
+    score = (
+        100.0
+        - W_FP_RATE * fp_rate
+        - W_DUP    * avg_dup
+        - W_TTC    * avg_ttc
+        + W_CONF   * (avg_conf - 0.5)
+    )
+    return max(0.0, min(100.0, score))
 
-    return {"per_rule": per_rule, "summary": summary}
 
-def _priority(score: float, fp_rate: float, dup: float, ttc: float) -> str:
-    # simple rule-based priority for MVP
+def _priority(score: float, fp_rate: float, avg_dup: float) -> str:
+    """
+    Rule-based tuning priority for MVP.
+    P0 = immediate action, P3 = healthy / monitor only.
+    """
     if score < 40 or fp_rate > 0.6:
         return "P0"
-    if score < 60 or (dup > 0.4 and fp_rate > 0.3):
+    if score < 60 or (avg_dup > 0.4 and fp_rate > 0.3):
         return "P1"
     if score < 75:
         return "P2"
