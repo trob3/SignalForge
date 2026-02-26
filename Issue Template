@@ -1,14 +1,41 @@
 ---
-name: Feature request
-about: Suggest an idea for SignalForge
-title: "[Feature] "
-labels: enhancement
+name: Feature Request
+about: Suggest an improvement or new capability for SignalForge
+title: "[Feature] <short description>"
+labels: ["enhancement", "needs-triage"]
+assignees: ""
 ---
 
-## What problem does this solve?
+## Problem Statement
+<!-- What pain point does this address? Who experiences it?
+     e.g. "As a SOC analyst, I have to manually cross-reference rule IDs because..." -->
 
-## Proposed solution
+## Proposed Solution
+<!-- What would you like to see built? Be as specific as you can.
+     If you have a rough idea of the implementation, include it here. -->
 
-## Alternatives considered
+## Alternatives Considered
+<!-- What other approaches did you think about? Why did you prefer this one? -->
 
-## Additional context
+## Acceptance Criteria
+<!-- How will we know this feature is done? List specific, testable outcomes.
+     e.g.
+     - [ ] Score output includes severity weighting
+     - [ ] Existing test suite still passes
+     - [ ] Documented in Scoring.md -->
+- [ ]
+- [ ]
+
+## SOC Context *(optional)*
+<!-- Is this tied to a specific SIEM, detection framework, or workflow?
+     e.g. Sentinel, Splunk, MITRE ATT&CK, alert triage SLA -->
+
+## Additional Context
+<!-- Screenshots, data samples, related issues, or external references -->
+
+## Priority Suggestion
+<!-- Your read on urgency — maintainers will set the final label -->
+- [ ] P0 — Blocking core workflow
+- [ ] P1 — High value, next sprint
+- [ ] P2 — Nice to have
+- [ ] P3 — Future consideration
