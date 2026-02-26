@@ -1,4 +1,5 @@
 import logging
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -8,26 +9,43 @@ from signalforge.api.routes import router
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Environment
+# ---------------------------------------------------------------------------
+APP_ENV        = os.getenv("APP_ENV", "development")
+IS_DEV         = APP_ENV == "development"
+ALLOWED_ORIGINS = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "*").split(",")]
 
+
+# ---------------------------------------------------------------------------
+# Lifespan
+# ---------------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("SignalForge starting up...")
+    logging.basicConfig(
+        level=logging.DEBUG if IS_DEV else logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s — %(message)s",
+    )
+    logger.info("SignalForge starting up... [env=%s]", APP_ENV)
     yield
-    logger.info("SignalForge shutting down...")
+    logger.info("SignalForge shutting down.")
 
 
+# ---------------------------------------------------------------------------
+# App
+# ---------------------------------------------------------------------------
 app = FastAPI(
     title="SignalForge",
     version="0.1.0",
-    description="Detection Quality Scoring & Alert Noise Optimizer (MVP)",
+    description="Detection Quality Scoring & Alert Noise Optimizer for SOC Teams",
     lifespan=lifespan,
-    docs_url="/docs",
-    redoc_url="/redoc",
+    docs_url="/docs" if IS_DEV else None,    # Disable Swagger UI in production
+    redoc_url="/redoc" if IS_DEV else None,  # Disable ReDoc in production
 )
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Tighten this before production
+    allow_origins=ALLOWED_ORIGINS,
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
@@ -35,6 +53,9 @@ app.add_middleware(
 app.include_router(router)
 
 
+# ---------------------------------------------------------------------------
+# Health
+# ---------------------------------------------------------------------------
 @app.get("/health", tags=["ops"], summary="Health check")
 def health() -> dict:
-    return {"status": "ok", "version": app.version}
+    return {"status": "ok", "version": app.version, "env": APP_ENV}
