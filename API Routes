@@ -6,7 +6,7 @@ from fastapi import APIRouter, File, HTTPException, UploadFile
 from pydantic import BaseModel
 
 from signalforge.core.normalization import normalize_alerts_df
-from signalforge.core.scoring import score_detections
+from signalforge.core.scoring import score_detections, RuleScore
 
 router = APIRouter(prefix="/v1")
 
@@ -15,13 +15,32 @@ ALLOWED_CONTENT_TYPES = {"text/csv", "application/csv", "text/plain"}
 
 
 class DetectionScore(BaseModel):
-    rule_name: str
-    score: float
-    fp_rate: float
-    duplication_rate: float
-    avg_time_to_close: float
-    confidence: float
-    alert_count: int
+    """API response schema — deliberately decoupled from the internal RuleScore dataclass."""
+    rule_id:                 str
+    rule_name:               str
+    alerts:                  int
+    detection_quality_score: float
+    false_positive_rate:     float
+    true_positive_rate:      float
+    avg_duplication_factor:  float
+    avg_ttc_factor:          float
+    avg_confidence:          float
+    tuning_priority:         str
+
+    @classmethod
+    def from_rule_score(cls, r: RuleScore) -> "DetectionScore":
+        return cls(
+            rule_id=r.rule_id,
+            rule_name=r.rule_name,
+            alerts=r.alerts,
+            detection_quality_score=r.detection_quality_score,
+            false_positive_rate=r.false_positive_rate,
+            true_positive_rate=r.true_positive_rate,
+            avg_duplication_factor=r.avg_duplication_factor,
+            avg_ttc_factor=r.avg_ttc_factor,
+            avg_confidence=r.avg_confidence,
+            tuning_priority=r.tuning_priority,
+        )
 
 
 @router.post(
@@ -82,7 +101,7 @@ async def score_csv(file: UploadFile = File(...)) -> List[DetectionScore]:
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Unexpected error during scoring: {e}")
 
-    if not result:
+    if not result.per_rule:
         raise HTTPException(status_code=422, detail="Scoring produced no results. Check your input data.")
 
-    return result
+    return [DetectionScore.from_rule_score(r) for r in result.per_rule]
