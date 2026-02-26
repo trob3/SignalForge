@@ -1,50 +1,185 @@
+import logging
+
 import pandas as pd
 
-# Minimal normalized schema (extend later):
-# rule_id, rule_name, severity, disposition, time_to_close_minutes, event_signature, confidence
-REQUIRED_COLS = ["rule_id", "rule_name", "severity", "disposition", "time_to_close_minutes", "event_signature"]
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Schema
+# ---------------------------------------------------------------------------
+
+REQUIRED_COLS = [
+    "rule_id",
+    "rule_name",
+    "severity",
+    "disposition",
+    "time_to_close_minutes",
+    "event_signature",
+]
+
+OPTIONAL_COLS = ["confidence"]
+
+# Ordered so that if multiple source columns map to the same target,
+# the first match wins (e.g. "AlertName" takes priority over "RuleName").
+COLUMN_MAP: list[tuple[str, str]] = [
+    ("AlertName",            "rule_name"),
+    ("RuleName",             "rule_name"),
+    ("RuleId",               "rule_id"),
+    ("AlertId",              "rule_id"),
+    ("AlertSeverity",        "severity"),
+    ("Severity",             "severity"),
+    ("Disposition",          "disposition"),
+    ("Status",               "disposition"),
+    ("TimeToCloseMinutes",   "time_to_close_minutes"),
+    ("TTCMinutes",           "time_to_close_minutes"),
+    ("Signature",            "event_signature"),
+    ("EventSignature",       "event_signature"),
+    ("Confidence",           "confidence"),
+    ("ConfidenceScore",      "confidence"),
+]
+
+VALID_SEVERITIES = {"low", "medium", "high", "critical", "informational"}
+VALID_DISPOSITIONS = {"true positive", "false positive", "benign", "undetermined", "open"}
+
+SEVERITY_ALIASES: dict[str, str] = {
+    "info": "informational",
+    "informational": "informational",
+    "low": "low",
+    "med": "medium",
+    "medium": "medium",
+    "high": "high",
+    "crit": "critical",
+    "critical": "critical",
+}
+
+DISPOSITION_ALIASES: dict[str, str] = {
+    "tp": "true positive",
+    "true positive": "true positive",
+    "fp": "false positive",
+    "false positive": "false positive",
+    "bp": "benign",
+    "benign": "benign",
+    "benign positive": "benign",
+    "undetermined": "undetermined",
+    "unknown": "undetermined",
+    "open": "open",
+    "new": "open",
+}
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
 def normalize_alerts_df(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Normalize a raw alert export DataFrame into the SignalForge schema.
+
+    Raises:
+        ValueError: if required columns are missing after all mapping attempts,
+                    or if confidence values are out of range.
+    """
+    if df.empty:
+        raise ValueError("Input DataFrame is empty.")
+
     df = df.copy()
 
-    # Allow users to upload exports with slightly different column names
-    column_map = {
-        "AlertName": "rule_name",
-        "RuleName": "rule_name",
-        "RuleId": "rule_id",
-        "AlertSeverity": "severity",
-        "Severity": "severity",
-        "Disposition": "disposition",
-        "Status": "disposition",
-        "TimeToCloseMinutes": "time_to_close_minutes",
-        "TTCMinutes": "time_to_close_minutes",
-        "Signature": "event_signature",
-        "EventSignature": "event_signature",
-        "Confidence": "confidence",
-    }
+    _apply_column_map(df)
+    _apply_defaults(df)
+    _clean_numeric(df)
+    _clean_severity(df)
+    _clean_disposition(df)
+    _validate_confidence(df)
+    _check_required(df)
 
-    for src, dst in column_map.items():
+    keep = REQUIRED_COLS + OPTIONAL_COLS
+    result = df[[c for c in keep if c in df.columns]]
+
+    logger.info(
+        "Normalization complete: %d rows, %d columns → %s",
+        len(result),
+        len(result.columns),
+        list(result.columns),
+    )
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Private helpers
+# ---------------------------------------------------------------------------
+
+def _apply_column_map(df: pd.DataFrame) -> None:
+    """Rename source columns to target schema columns. First match wins."""
+    for src, dst in COLUMN_MAP:
         if src in df.columns and dst not in df.columns:
-            df[dst] = df[src]
+            df.rename(columns={src: dst}, inplace=True)
+            logger.debug("Mapped column '%s' → '%s'", src, dst)
 
-    # Defaults
+
+def _apply_defaults(df: pd.DataFrame) -> None:
     if "confidence" not in df.columns:
-        df["confidence"] = 0.5  # 0..1
+        df["confidence"] = 0.5
+        logger.debug("'confidence' not found — defaulting to 0.5")
 
-    # Basic cleanup
+
+def _clean_numeric(df: pd.DataFrame) -> None:
     if "time_to_close_minutes" in df.columns:
-        df["time_to_close_minutes"] = pd.to_numeric(df["time_to_close_minutes"], errors="coerce").fillna(0)
+        before_nulls = df["time_to_close_minutes"].isna().sum()
+        df["time_to_close_minutes"] = (
+            pd.to_numeric(df["time_to_close_minutes"], errors="coerce")
+            .clip(lower=0)        # negative durations aren't meaningful
+            .fillna(0)
+        )
+        if before_nulls:
+            logger.warning(
+                "%d non-numeric 'time_to_close_minutes' values coerced to 0.", before_nulls
+            )
 
-    if "severity" in df.columns:
-        df["severity"] = df["severity"].astype(str).str.lower()
 
-    if "disposition" in df.columns:
-        df["disposition"] = df["disposition"].astype(str).str.lower()
+def _clean_severity(df: pd.DataFrame) -> None:
+    if "severity" not in df.columns:
+        return
+    df["severity"] = (
+        df["severity"].astype(str).str.strip().str.lower().map(SEVERITY_ALIASES)
+    )
+    unknown = df["severity"].isna().sum()
+    if unknown:
+        logger.warning(
+            "%d rows have unrecognised severity values — filling with 'medium'.", unknown
+        )
+    df["severity"] = df["severity"].fillna("medium")
 
+
+def _clean_disposition(df: pd.DataFrame) -> None:
+    if "disposition" not in df.columns:
+        return
+    df["disposition"] = (
+        df["disposition"].astype(str).str.strip().str.lower().map(DISPOSITION_ALIASES)
+    )
+    unknown = df["disposition"].isna().sum()
+    if unknown:
+        logger.warning(
+            "%d rows have unrecognised disposition values — filling with 'undetermined'.", unknown
+        )
+    df["disposition"] = df["disposition"].fillna("undetermined")
+
+
+def _validate_confidence(df: pd.DataFrame) -> None:
+    if "confidence" not in df.columns:
+        return
+    df["confidence"] = pd.to_numeric(df["confidence"], errors="coerce").fillna(0.5)
+    out_of_range = (~df["confidence"].between(0.0, 1.0)).sum()
+    if out_of_range:
+        raise ValueError(
+            f"{out_of_range} rows have 'confidence' values outside [0.0, 1.0]. "
+            "Please normalise confidence to a 0–1 scale before uploading."
+        )
+
+
+def _check_required(df: pd.DataFrame) -> None:
     missing = [c for c in REQUIRED_COLS if c not in df.columns]
     if missing:
-        raise ValueError(f"Missing required columns after normalization: {missing}")
-
-    # Keep only normalized columns + confidence
-    keep = REQUIRED_COLS + ["confidence"]
-    return df[keep]
+        raise ValueError(
+            f"Missing required columns after normalization: {missing}. "
+            "Check your CSV headers or the column mapping table."
+        )
